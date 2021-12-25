@@ -1,6 +1,7 @@
 module command_generator;
 
 import std.string:join;
+import std.array:join;
 
 //Import the commonly shared buildapi
 import buildapi;
@@ -70,7 +71,10 @@ string getExtension(OutputType t)
 }
 
 
+
 enum p = getProject();
+
+string sendProjectsDependencies(){return unpackDependencies(p);}
 
 
 immutable(string[]) buildCommand = () 
@@ -114,9 +118,15 @@ immutable(string[]) buildCommand = ()
 }();
 
 
+/**
+*   The command generator is a program which may receive the following arguments:
+*   - getCommand : Executed automatically when hipmake runs hipmake command
+*   - dependenciesResolved : That means this program is receiving the correct arguments
+*   taking into account the dependencies
+*/
 int main(string[] args)
 {    
-    if(args.length > 1 && args[1] == "getCommand")
+    if(args.length > 1 && args[1] == CommandGeneratorControl.getCommand)
     {
         string character;
         version(Windows)
@@ -124,20 +134,27 @@ int main(string[] args)
         else
             character = " \\\n";
         writeln(buildCommand.join(character));
-        return "getCommand".length;
+        return ExitCodes.commands;
     }
-    StopWatch st = StopWatch(AutoStart.yes);
-    auto ex = execute(buildCommand);
-    st.stop();
-    if(ex.status)
+    if(p.dependencies != null && !(args.length > 1 && args[1] != CommandGeneratorControl.dependenciesResolved))
     {
-        writeln(ex.output);
-        return ex.status;
+        writeln(sendProjectsDependencies);
+        return ExitCodes.dependencies;
     }
-    bool quiet = (args.length > 1) && args[1] == "quiet";
+
+    return 0;
+    // StopWatch st = StopWatch(AutoStart.yes);
+    // auto ex = execute(buildCommand);
+    // st.stop();
+    // if(ex.status)
+    // {
+    //     writeln(ex.output);
+    //     return ex.status;
+    // }
+    // bool quiet = (args.length > 1) && args[1] == "quiet";
     
 
-    if(!quiet)
-        writeln("Built project '"~p.name~"' in ", (st.peek.total!"msecs"), " ms.") ;
-    return 0;
+    // if(!quiet)
+    //     writeln("Built project '"~p.name~"' in ", (st.peek.total!"msecs"), " ms.") ;
+    // return 0;
 }
