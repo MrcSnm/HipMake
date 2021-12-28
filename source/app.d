@@ -1,4 +1,5 @@
 import std.conv:to;
+import std.typecons:Tuple;
 import std.array;
 import std.path;
 import std.file;
@@ -21,9 +22,9 @@ struct DependencyNode
     DependencyInfo info;
     DependenciesPack pack;
 
-    DependencyNode[] children;
+    DependencyNode*[] children;
 
-    public void addChild(DependencyNode node){children~= node;}
+    public void addChild(DependencyNode* node){children~= node;}
 
 
     alias info this;
@@ -64,6 +65,14 @@ enum projectFileName     = "project.d";
 enum tsCache             = ".timestamp_cache";
 
 
+nothrow long getTimeLastModified(string file)
+{
+    if(!std.file.exists(file))
+        return -1;
+    try{return std.file.timeLastModified(file).stdTime;}
+    catch(Exception e){return -1;}
+}
+
 nothrow bool isUpToDate(string workspace)
 {
     string cache = buildPath(workspace, ".hipmake", tsCache);
@@ -82,7 +91,7 @@ nothrow bool isUpToDate(string workspace)
         f.rawRead(buff);
         f.close();
         long ts = to!long((cast(string)buff));
-        long projMod = std.file.timeLastModified(proj).stdTime;
+        long projMod = getTimeLastModified(proj);
         return ts == projMod;    
     }
     catch(Exception e)
@@ -117,6 +126,7 @@ nothrow bool createTimestampCache(string workspace)
 
 int buildCommandGenerator(string hipMakePath, string workingDir)
 {
+    chdir(workingDir);
     string outputPath = buildPath(workingDir, ".hipmake");
     string[] commands = 
     [
@@ -141,6 +151,14 @@ int buildCommandGenerator(string hipMakePath, string workingDir)
     return 0;
 }
 
+
+void makeImportPathAbsolute(string workingDir, ref DependenciesPack pack)
+{
+    foreach(ref i; pack.importPaths)
+        i = buildNormalizedPath(workingDir, i);
+    
+}
+
 string replaceAll(string str, string replaceWhat, string replaceWith)
 {
     int checking = 0;
@@ -163,58 +181,116 @@ string replaceAll(string str, string replaceWhat, string replaceWith)
     return ret;
 }
 
-int execBuild(string workingDir, string projectName, DependencyNode parentNode)
+alias ShellOutput = Tuple!(int, "status", string, "output");
+
+ShellOutput
+execBuild(string workingDir, string projectName, DependencyNode* parentNode, bool dependenciesRequired = false)
 {
+    chdir(workingDir);
     string file = buildPath(workingDir, ".hipmake", "build"~outputExt);
     string cmd = file;
     //This must be later after resolves the dependencies
     if(willGetCommand)
         cmd~= " getCommand";
+    else if(dependenciesRequired)
+        cmd~= " "~CommandGeneratorControl.dependenciesRequired;
 
     auto ret = std.process.executeShell(cmd);
-    writeln(cmd);
 
     if(ret.status == ExitCodes.commands)
     {
         std.file.write(buildPath(workingDir, ".hipmake", "command.txt"), ret.output);
-        return 0;
+        return ShellOutput(ExitCodes.success, "");
     }
     else if(ret.status == ExitCodes.dependencies)
     {
-        DependenciesPack pack = packDependencies(ret.output.replaceAll("\r", ""));
-        if(parentNode == DependencyNode.init)
-            root = parentNode = DependencyNode(DependencyInfo("Root", workingDir), pack, []);
+        DependenciesPack pack = packDependencies(workingDir, ret.output.replaceAll("\r", ""));
+        makeImportPathAbsolute(workingDir, pack);
+        if(parentNode == &root)
+            root = *parentNode = DependencyNode(DependencyInfo("Root", workingDir), pack, []);
+        //Save the current dependencies on the parentNode pack.            
+        parentNode.pack = pack;
 
-
+        //If it has project dependencies, create a new dependency node and add it
         foreach(string dependencyProjectName, dependencyProjectPath; pack.projects) //Build the command generator for them
         {
             string path = dependencyProjectPath;
-            DependencyNode dep = DependencyNode(DependencyInfo(dependencyProjectName, dependencyProjectPath),
-            pack, []);
+            DependencyNode* dep = new DependencyNode(DependencyInfo(dependencyProjectName, dependencyProjectPath),
+            DependenciesPack.init, []);
+
             parentNode.addChild(dep);
 
-            if(!isAbsolute(path))
-                path = buildNormalizedPath(workingDir, path);
+            path = (!path.isAbsolute) ? buildNormalizedPath(workingDir, path) : path;
+            
 
             if(int status = buildCommandGenerator(hipMakePath, path))
             {
-                writeln("Building generator failed at directory '"~path~"'");
-                return 1;
+                writeln("Building generator failed at directory '"~path~"' with status ", status);
+                return ShellOutput(ExitCodes.error, "");
             }
-            if(int status = execBuild(path, dependencyProjectName, dep))
+
+            auto depBuild = execBuild(path, dependencyProjectName, dep, true);
+
+            switch(depBuild.status)
             {
-                writeln("Dependency build failed at project '"~dependencyProjectName~"'("~path~")");
-                return 1;
+                case ExitCodes.success:break;
+                default:
+                    writeln("Dependency build failed at project '"~
+                        dependencyProjectName~"'("~path~") with error\n", depBuild.output);
+                    return depBuild;
+
             }
         }
-        writeln(pack);
     }
-    return ret.status;
+    // writeln(*root.children[0]);
+    //TesteScene ->
+    //  HipEngineApi -> (Dependency)
+    //      HipEngine
+    return ret;
+}
+
+
+ref DependenciesPack packFromRoot(DependencyNode* node, return ref DependenciesPack toPack)
+{
+    toPack.importPaths~= node.pack.importPaths;
+    toPack.versions~= node.pack.versions;
+    toPack.libPaths~= node.pack.libPaths;
+    toPack.libs~= node.pack.libs;
+    foreach(c;  node.children)
+        packFromRoot(c, toPack);
+
+    return toPack;
+}
+
+
+ShellOutput resolveDependencies(string workingDir, DependenciesPack p)
+{
+    chdir(workingDir);
+    string file = buildPath(workingDir, ".hipmake", "build"~outputExt);
+    string[] cmd = [file];
+    cmd~= CommandGeneratorControl.dependenciesResolved;
+
+    cmd~= unpackDependencies(p);
+
+    auto ret = std.process.execute(cmd);
+
+    if(ret.status == ExitCodes.commands)
+    {
+        std.file.write(buildPath(workingDir, ".hipmake", "command.txt"), ret.output);
+        return ShellOutput(ExitCodes.success, "");
+    }
+
+    return ret;
 }
 
 nothrow bool clean(string workingDir)
 {
-    try{rmdirRecurse(buildPath(workingDir, ".hipmake")); return true;}
+    try
+    {
+        if(std.file.exists(buildPath(workingDir, ".hipmake")))
+            rmdirRecurse(buildPath(workingDir, ".hipmake"));
+        return true;
+    }
     catch(Exception e)
     {
         try{writeln("Could not remove .hipmake: ", e.toString); return false;}
@@ -257,6 +333,22 @@ void createHipmakeFolder(string workingDir)
     std.file.mkdirRecurse(buildPath(workingDir, ".hipmake"));
 }
 
+string formatError(string err)
+{
+    import std.algorithm:countUntil;
+
+    if(err.countUntil("which cannot be read") != -1)
+    {
+        int moduleNameStart = err.countUntil("`") + 1;
+        int moduleNameEnd = err[moduleNameStart..$].countUntil("`") + moduleNameStart;
+        string moduleName = err[moduleNameStart..moduleNameEnd];
+
+        return err~"\nMaybe you forgot to add the module '"~moduleName~"' source root to import paths?
+        Hipmake Failed!";
+    }
+    return err~"\nHipmake Failed!";
+}
+
 bool willGetCommand = false;
 string hipMakePath;
 
@@ -290,16 +382,16 @@ int main(string[] args)
     if(isUpToDate(workingDir))
     {
         writeln("Building "~workingDir);
-        int status = execBuild(workingDir, "Root", root);
+        int status = execBuild(workingDir, "Root", new DependencyNode()).status;
         if(status)
             writeln("HipMake failed!");
         return status;
     }
 
     if(checkEnvironment(hipMakePath))
-        return 1;
+        return ExitCodes.error;
     if(checkProject(workingDir))
-        return 1;
+        return ExitCodes.error;
     createHipmakeFolder(workingDir);
     
     if(int cmdGen = buildCommandGenerator(hipMakePath, workingDir))
@@ -309,15 +401,21 @@ int main(string[] args)
     }
 
     writeln("Building "~workingDir);
-    if(int status = execBuild(workingDir, "Root", root))
+
+    auto res = execBuild(workingDir, "Root", &root);
+    if(res.status == ExitCodes.dependencies)
     {
-        writeln("HipMake failed!");
-        return status;
+        DependenciesPack p;
+        packFromRoot(&root, p);
+        res = resolveDependencies(workingDir, p);
+        if(res.status)
+            writeln(formatError(res.output));
+        return res.status;
     }
     chdir(workingDir);
 
     if(!createTimestampCache(workingDir))
         writeln("Could not create a timestamp cache");
 
-    return 0;
+    return ExitCodes.success;
 }

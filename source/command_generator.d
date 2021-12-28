@@ -77,7 +77,7 @@ enum p = getProject();
 string sendProjectsDependencies(){return unpackDependencies(p);}
 
 
-immutable(string[]) buildCommand = () 
+string[] buildCommand(string[] extraImports = [], string[] extraVersions = [])
 {
     enum compiler = p.compiler.getCompiler;
 
@@ -100,9 +100,10 @@ immutable(string[]) buildCommand = ()
             break;
     }
 
-    foreach(i; p.importDirectories)
+    foreach(i; p.importDirectories ~ extraImports)
         cmd~= "-I"~i;
-    foreach(v; p.versions)
+
+    foreach(v; p.versions ~ extraVersions)
         cmd~= compiler.getVersion~v;
 
     cmd~= "-i";
@@ -115,7 +116,46 @@ immutable(string[]) buildCommand = ()
     cmd~= "-of"~p.outputDirectory~pathSep~p.name ~ p.outputType.getExtension;
 
     return cmd;
-}();
+}
+
+
+int returnCommandString()
+{
+    string character;
+    version(Windows)
+        character = " ^\n";
+    else
+        character = " \\\n";
+    writeln(buildCommand.join(character));
+    return ExitCodes.commands;
+}
+
+
+string[] getExtraVersions(string dependencies)
+{
+    return packDependencies("", dependencies).versions;
+}
+string[] getExtraImports(string dependencies)
+{
+    return packDependencies("", dependencies).importPaths;
+}
+
+
+enum hasDependencies = p.dependencies !is null;
+
+bool shouldReturnDependencies(string command)
+{
+    switch(command)
+    {
+        case CommandGeneratorControl.dependenciesRequired:
+            return true;
+        case CommandGeneratorControl.dependenciesResolved:
+            return false;
+        default:
+            return hasDependencies;
+    }
+}
+
 
 
 /**
@@ -125,36 +165,33 @@ immutable(string[]) buildCommand = ()
 *   taking into account the dependencies
 */
 int main(string[] args)
-{    
-    if(args.length > 1 && args[1] == CommandGeneratorControl.getCommand)
-    {
-        string character;
-        version(Windows)
-            character = " ^\n";
-        else
-            character = " \\\n";
-        writeln(buildCommand.join(character));
-        return ExitCodes.commands;
-    }
-    if(p.dependencies != null && !(args.length > 1 && args[1] != CommandGeneratorControl.dependenciesResolved))
+{ 
+    string command = args.length > 1 ? args[1] : "";
+    if(command == CommandGeneratorControl.getCommand)
+        return returnCommandString();
+    if(shouldReturnDependencies(command))
     {
         writeln(sendProjectsDependencies);
         return ExitCodes.dependencies;
     }
 
-    return 0;
-    // StopWatch st = StopWatch(AutoStart.yes);
-    // auto ex = execute(buildCommand);
-    // st.stop();
-    // if(ex.status)
-    // {
-    //     writeln(ex.output);
-    //     return ex.status;
-    // }
-    // bool quiet = (args.length > 1) && args[1] == "quiet";
+    string[] extraImports = command == CommandGeneratorControl.dependenciesResolved ? 
+                            getExtraImports(args[2]) : [];
+
+    string[] extraVersions = command == CommandGeneratorControl.dependenciesResolved ?
+                            getExtraVersions(args[2]) : [];
+
+    StopWatch st = StopWatch(AutoStart.yes);
+    auto ex = execute(buildCommand(extraImports, extraVersions));
+    st.stop();
+    if(ex.status)
+    {
+        return ex.status;
+    }
+    bool quiet = (args.length > 1) && args[1] == "quiet";
     
 
-    // if(!quiet)
-    //     writeln("Built project '"~p.name~"' in ", (st.peek.total!"msecs"), " ms.") ;
-    // return 0;
+    if(!quiet)
+        writeln("Built project '"~p.name~"' in ", (st.peek.total!"msecs"), " ms.") ;
+    return 0;
 }

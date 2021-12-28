@@ -1,12 +1,16 @@
+import std.path;
+
 enum CommandGeneratorControl : string
 {
     getCommand = "getCommand",
-    dependencies = "dependencies",
+    dependenciesRequired = "dependenciesRequired",
     dependenciesResolved = "dependenciesResolved"
 }
 
 enum ExitCodes
 {
+    success = 0,
+    error = 1,
     commands = 2,
     dependencies = 3,
 }
@@ -107,7 +111,7 @@ ProjectPair getProjectPair(string projInput)
     throw new Error("Could not find the expected input in "~projInput);
 }
 
-DependenciesPack packDependencies(string deps)
+DependenciesPack packDependencies(string workingDir, string deps)
 {
     DependenciesPack pack;
     string[] lines = deps.split('\n');
@@ -125,6 +129,7 @@ DependenciesPack packDependencies(string deps)
             current++;
             continue;
         }
+
         
         if(l != "")
         {
@@ -132,13 +137,15 @@ DependenciesPack packDependencies(string deps)
             {
                 case PackingOrder.PROJECTS:
                     ProjectPair p = getProjectPair(l);
-                    pack.projects[p.key] = p.value;
+                    pack.projects[p.key] = isAbsolute(p.value) ?
+                                        buildNormalizedPath(workingDir, p.value) :
+                                        p.value;
                     break;
                 case PackingOrder.IMPORTS:
-                    pack.importPaths~= l;
+                    pack.importPaths~= isAbsolute(l) ? buildNormalizedPath(workingDir, l) : l;
                     break;
                 case PackingOrder.LIBPATHS:
-                    pack.libPaths~= l;
+                    pack.libPaths~= isAbsolute(l) ? buildNormalizedPath(workingDir, l) : l;
                     break;
                 case PackingOrder.LIBS:
                     pack.libs~= l;
