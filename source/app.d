@@ -1,3 +1,4 @@
+import std.algorithm:countUntil;
 import std.conv:to;
 import std.typecons:Tuple;
 import std.array;
@@ -62,7 +63,7 @@ bool handleDependency(DependencyInfo parent, DependencyInfo child, out string er
 
 enum environmentVariable = "HIPMAKE_SOURCE_PATH";
 enum projectFileName     = "project.d";
-enum tsCache             = ".timestamp_cache";
+enum cacheFile             = ".hipmake_cache";
 
 
 nothrow long getTimeLastModified(string file)
@@ -73,9 +74,9 @@ nothrow long getTimeLastModified(string file)
     catch(Exception e){return -1;}
 }
 
-nothrow bool isUpToDate(string workspace)
+nothrow bool isUpToDate(string workspace, out DependenciesPack outputPack)
 {
-    string cache = buildPath(workspace, ".hipmake", tsCache);
+    string cache = buildPath(workspace, ".hipmake", cacheFile);
     string proj = buildPath(workspace, projectFileName);
 
     if(!std.file.exists(proj))
@@ -86,12 +87,17 @@ nothrow bool isUpToDate(string workspace)
     //Read the timestamp
     try
     {
-        File f = File(cache);
+        File f = File(cache, "rb");
         ubyte[] buff = new ubyte[cast(uint)(f.size)];
         f.rawRead(buff);
         f.close();
-        long ts = to!long((cast(string)buff));
+
+        string[] content = (cast(string)buff).split('\n');
+
+        long ts = to!long(content[1]);
         long projMod = getTimeLastModified(proj);
+        outputPack = packDependencies(workspace, content[2..$].join("\n"));
+
         return ts == projMod;    
     }
     catch(Exception e)
@@ -106,14 +112,16 @@ nothrow bool isUpToDate(string workspace)
 /**
 *  Returns if operation was succesful
 */
-nothrow bool createTimestampCache(string workspace)
+nothrow bool createCache(string workspace, DependenciesPack pack = DependenciesPack.init)
 {
     try
     {
         long t = std.file.timeLastModified(buildPath(workspace, projectFileName)).stdTime;
-        string path = buildPath(workspace, ".hipmake", tsCache);
-        File f = File(path, "w");
+        string path = buildPath(workspace, ".hipmake", cacheFile);
+        File f = File(path, "wb");
+        f.write("TIMESTAMP:\n");
         f.write(t);
+        f.write("\n", unpackDependencies(pack));
         f.close();
     }
     catch(Exception e)
@@ -243,29 +251,22 @@ execBuild(string workingDir, string projectName, DependencyNode* parentNode, boo
             }
         }
     }
-    // writeln(*root.children[0]);
-    //TesteScene ->
-    //  HipEngineApi -> (Dependency)
-    //      HipEngine
     return ret;
 }
 
 
 ref DependenciesPack packFromRoot(DependencyNode* node, return ref DependenciesPack toPack)
 {
-    // if(node != &root) //As it only needs the extra things, don't take root
-    // {
+    if(node != &root) //As it only needs the extra things, don't take root
+    {
         toPack.importPaths~= node.pack.importPaths;
         toPack.versions~= node.pack.versions;
         toPack.libPaths~= node.pack.libPaths;
         toPack.libs~= node.pack.libs;
-    // }
+    }
     
     foreach(c;  node.children)
-    {
-        writeln(*c);
         packFromRoot(c, toPack);
-    }
 
     return toPack;
 }
@@ -348,7 +349,6 @@ void createHipmakeFolder(string workingDir)
 
 string formatError(string err)
 {
-    import std.algorithm:countUntil;
 
     if(err.countUntil("which cannot be read") != -1)
     {
@@ -379,6 +379,8 @@ int main(string[] args)
 {
     string workingDir = getcwd();
 
+    DependenciesPack packToCache;
+
     if(args.length > 1 && args[1] == "clean")
         return cast(int)clean(workingDir);
     else if(args.length > 1 && args[1] == "rebuild")
@@ -392,13 +394,15 @@ int main(string[] args)
     else if(args.length > 1 && args[1] == "command")
         willGetCommand = true;
 
-    if(isUpToDate(workingDir))
+    if(isUpToDate(workingDir, packToCache))
     {
         writeln("Building "~workingDir);
-        int status = execBuild(workingDir, "Root", new DependencyNode()).status;
-        if(status)
-            writeln("HipMake failed!");
-        return status;
+        auto ret = resolveDependencies(workingDir, packToCache);
+        if(ret.status)
+            writeln(formatError(ret.output));
+        else
+            writeln(ret.output);
+        return ret.status;
     }
 
     if(checkEnvironment(hipMakePath))
@@ -418,14 +422,12 @@ int main(string[] args)
     auto res = execBuild(workingDir, "Root", &root);
     if(res.status == ExitCodes.dependencies)
     {
-        DependenciesPack p;
-        packFromRoot(&root, p);
-        res = resolveDependencies(workingDir, p);
+        packFromRoot(&root, packToCache);
+        res = resolveDependencies(workingDir, packToCache);
         if(res.status)
             writeln(formatError(res.output));
         else
             writeln(res.output);
-        return res.status;
     }
     else if(res.status == ExitCodes.error)
     {
@@ -434,7 +436,7 @@ int main(string[] args)
     }
     chdir(workingDir);
 
-    if(!createTimestampCache(workingDir))
+    if(!createCache(workingDir, packToCache))
         writeln("Could not create a timestamp cache");
 
     return ExitCodes.success;
