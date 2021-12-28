@@ -192,7 +192,7 @@ execBuild(string workingDir, string projectName, DependencyNode* parentNode, boo
     //This must be later after resolves the dependencies
     if(willGetCommand)
         cmd~= " getCommand";
-    else if(dependenciesRequired)
+    if(dependenciesRequired)
         cmd~= " "~CommandGeneratorControl.dependenciesRequired;
 
     auto ret = std.process.executeShell(cmd);
@@ -234,6 +234,7 @@ execBuild(string workingDir, string projectName, DependencyNode* parentNode, boo
             switch(depBuild.status)
             {
                 case ExitCodes.success:break;
+                case ExitCodes.dependencies:break;
                 default:
                     writeln("Dependency build failed at project '"~
                         dependencyProjectName~"'("~path~") with error\n", depBuild.output);
@@ -252,12 +253,19 @@ execBuild(string workingDir, string projectName, DependencyNode* parentNode, boo
 
 ref DependenciesPack packFromRoot(DependencyNode* node, return ref DependenciesPack toPack)
 {
-    toPack.importPaths~= node.pack.importPaths;
-    toPack.versions~= node.pack.versions;
-    toPack.libPaths~= node.pack.libPaths;
-    toPack.libs~= node.pack.libs;
+    // if(node != &root) //As it only needs the extra things, don't take root
+    // {
+        toPack.importPaths~= node.pack.importPaths;
+        toPack.versions~= node.pack.versions;
+        toPack.libPaths~= node.pack.libPaths;
+        toPack.libs~= node.pack.libs;
+    // }
+    
     foreach(c;  node.children)
+    {
+        writeln(*c);
         packFromRoot(c, toPack);
+    }
 
     return toPack;
 }
@@ -271,6 +279,11 @@ ShellOutput resolveDependencies(string workingDir, DependenciesPack p)
     cmd~= CommandGeneratorControl.dependenciesResolved;
 
     cmd~= unpackDependencies(p);
+
+    if(willGetCommand)
+    {
+        cmd~= CommandGeneratorControl.getCommand;
+    }
 
     auto ret = std.process.execute(cmd);
 
@@ -410,7 +423,14 @@ int main(string[] args)
         res = resolveDependencies(workingDir, p);
         if(res.status)
             writeln(formatError(res.output));
+        else
+            writeln(res.output);
         return res.status;
+    }
+    else if(res.status == ExitCodes.error)
+    {
+        writeln(res.output);
+        return ExitCodes.error;
     }
     chdir(workingDir);
 

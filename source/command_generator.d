@@ -77,7 +77,8 @@ enum p = getProject();
 string sendProjectsDependencies(){return unpackDependencies(p);}
 
 
-string[] buildCommand(string[] extraImports = [], string[] extraVersions = [])
+string[] buildCommand(string[] extraImports = [], string[] extraVersions = [],
+string[] extraLibs = [], string[] extraLibPaths = [])
 {
     enum compiler = p.compiler.getCompiler;
 
@@ -106,6 +107,12 @@ string[] buildCommand(string[] extraImports = [], string[] extraVersions = [])
     foreach(v; p.versions ~ extraVersions)
         cmd~= compiler.getVersion~v;
 
+
+    foreach(l; p.libraries ~ extraLibs)
+        cmd~= "-l"~l~libExt;
+    foreach(lp; p.libraryPaths~extraLibPaths)
+        cmd~= "-L-L"~lp;
+
     cmd~= "-i";
     cmd~= p.sourceEntryPoint;
 
@@ -119,44 +126,58 @@ string[] buildCommand(string[] extraImports = [], string[] extraVersions = [])
 }
 
 
-int returnCommandString()
+int returnCommandString(string[] extraImports, string[] extraVersions, string[] extraLibs, string[] extraLibPaths)
 {
     string character;
     version(Windows)
         character = " ^\n";
     else
         character = " \\\n";
-    writeln(buildCommand.join(character));
+
+    writeln(buildCommand(extraImports, extraVersions, extraLibs, extraLibPaths).join(character));
     return ExitCodes.commands;
 }
 
 
-string[] getExtraVersions(string dependencies)
-{
-    return packDependencies("", dependencies).versions;
-}
-string[] getExtraImports(string dependencies)
-{
-    return packDependencies("", dependencies).importPaths;
-}
 
 
 enum hasDependencies = p.dependencies !is null;
 
-bool shouldReturnDependencies(string command)
+bool shouldReturnDependencies()
 {
-    switch(command)
-    {
-        case CommandGeneratorControl.dependenciesRequired:
-            return true;
-        case CommandGeneratorControl.dependenciesResolved:
-            return false;
-        default:
-            return hasDependencies;
-    }
+    if(dependenciesRequired)
+        return true;
+    else if(dependenciesResolved)
+        return false;
+    else
+        return hasDependencies;
 }
 
 
+
+bool contains(T)(T[] arr, T what)
+{
+    foreach(a; arr)
+        if(a == what)
+            return true;
+    return false;
+}
+
+import std.typecons:Tuple;
+
+alias BoolArg = Tuple!(bool*, string);
+
+void loadArgs(string[] str, Tuple!(bool*, string)[] args)
+{
+    foreach(a; args)
+    {
+        *a[0] = str.contains(a[1]);
+    }
+}
+
+bool dependenciesResolved;
+bool dependenciesRequired;
+bool getCommand;
 
 /**
 *   The command generator is a program which may receive the following arguments:
@@ -166,23 +187,38 @@ bool shouldReturnDependencies(string command)
 */
 int main(string[] args)
 { 
-    string command = args.length > 1 ? args[1] : "";
-    if(command == CommandGeneratorControl.getCommand)
-        return returnCommandString();
-    if(shouldReturnDependencies(command))
+    loadArgs(args, 
+    [
+    BoolArg(&dependenciesResolved, "dependenciesResolved"),
+    BoolArg(&dependenciesRequired, "dependenciesRequired"),
+    BoolArg(&getCommand, "getCommand")
+    ]
+    );
+
+    if(shouldReturnDependencies())
     {
         writeln(sendProjectsDependencies);
         return ExitCodes.dependencies;
     }
 
-    string[] extraImports = command == CommandGeneratorControl.dependenciesResolved ? 
-                            getExtraImports(args[2]) : [];
+    string[] extraImports  = [];
+    string[] extraVersions = [];
+    string[] extraLibs     = [];
+    string[] extraLibPaths = [];
+    if(dependenciesResolved)
+    {
+        DependenciesPack p = packDependencies("", args[2]);
+        extraImports = p.importPaths;
+        extraVersions = p.versions;
+        extraLibs = p.libs;
+        extraLibPaths = p.libPaths;
+    }
 
-    string[] extraVersions = command == CommandGeneratorControl.dependenciesResolved ?
-                            getExtraVersions(args[2]) : [];
+    if(getCommand)
+        return returnCommandString(extraImports, extraVersions, extraLibs, extraLibPaths);
 
     StopWatch st = StopWatch(AutoStart.yes);
-    auto ex = execute(buildCommand(extraImports, extraVersions));
+    auto ex = execute(buildCommand(extraImports, extraVersions, extraLibs, extraLibPaths));
     st.stop();
     if(ex.status)
     {
